@@ -1,0 +1,22 @@
+{
+  "id": "mediapager.stream.vidsrc",
+  "name": "Vidsrc",
+  "description": "Resolves Vidsrc embeds to their HLS master playlists for streaming.",
+  "author": "Community",
+  "types": "stream,actions",
+  "sdk": "MediaPager.App.PluginContracts",
+  "sdkVersion": "0.1.0",
+  "requires": [
+    {
+      "id": "mediapager.interface.download",
+      "repo": "https://github.com/happygolucky-dev/MediaPager.Plugins.Interface.Download.git"
+    },
+    {
+      "id": "mediapager.actions.downloads",
+      "repo": "https://github.com/happygolucky-dev/MediaPager.Plugins.Actions.Downloads.git"
+    }
+  ],
+  "references": [
+    "https://github.com/happygolucky-dev/MediaPager.Plugins.Interface.Download.git"
+  ]
+}
