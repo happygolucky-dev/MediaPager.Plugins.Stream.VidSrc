@@ -9,7 +9,8 @@ namespace MediaPager.Plugins.Stream.VidSrc;
 /// <summary>
 /// Owns the shared headless browser and one resolve operation at a time (an embed page can
 /// only produce one link at once). Faithful port of the resolve flow that used to live in the
-/// app host. Returns null instead of throwing so a failed lookup just means "no stream".
+/// app host. Returns null when the provider has no stream, and reports local setup failures
+/// as structured plugin errors.
 /// </summary>
 internal sealed class PlaywrightResolver : IAsyncDisposable
 {
@@ -71,7 +72,24 @@ internal sealed class PlaywrightResolver : IAsyncDisposable
             }
 
             // Step 2: load the embed page and capture the HLS master playlist request.
-            var context = await (await GetBrowserAsync()).NewContextAsync(new() { UserAgent = userAgent });
+            IBrowser browser;
+            try
+            {
+                browser = await GetBrowserAsync();
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception exception)
+            {
+                throw new PluginOperationException(new PluginError(
+                    "vidsrc.chromium.unavailable",
+                    "VidSrc could not start Playwright Chromium. The browser may be missing or its operating-system dependencies may not be installed.",
+                    "Install Playwright Chromium for the same account that runs MediaPager. From a VidSrc checkout, run dotnet build, then run the generated bin/Debug/net10.0/playwright.ps1 install chromium script on Windows or the platform's generated Playwright install script on Linux/macOS. Install Linux browser dependencies too, then retry."), exception);
+            }
+
+            var context = await browser.NewContextAsync(new() { UserAgent = userAgent });
             page = await context.NewPageAsync();
 
             // Block the anti-automation script that wipes the page, plus tracker junk.
@@ -119,6 +137,10 @@ internal sealed class PlaywrightResolver : IAsyncDisposable
             var done = await Task.WhenAny(linkFound.Task, Task.Delay(TimeSpan.FromSeconds(30)));
             return done == linkFound.Task ? linkFound.Task.Result : null;
         }
+        catch (PluginOperationException)
+        {
+            throw;
+        }
         catch (Exception exception)
         {
             Console.Error.WriteLine($"[{nameof(PlaywrightResolver)}] resolve failed: {exception.Message}");
@@ -145,13 +167,24 @@ internal sealed class PlaywrightResolver : IAsyncDisposable
         if (_browser is { IsConnected: true })
             return _browser;
 
-        _playwright = await Playwright.CreateAsync();
-        _browser = await _playwright.Chromium.LaunchAsync(new()
+        _playwright?.Dispose();
+        var playwright = await Playwright.CreateAsync();
+        _playwright = playwright;
+        try
         {
-            Headless = true,
-            Args = ["--disable-blink-features=AutomationControlled"],
-        });
-        return _browser;
+            _browser = await playwright.Chromium.LaunchAsync(new()
+            {
+                Headless = true,
+                Args = ["--disable-blink-features=AutomationControlled"],
+            });
+            return _browser;
+        }
+        catch
+        {
+            playwright.Dispose();
+            _playwright = null;
+            throw;
+        }
     }
 
     public async ValueTask DisposeAsync()

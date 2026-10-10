@@ -17,6 +17,20 @@ into the provider's HLS master playlist URL, by driving the embed page headlessl
 The plugin only ever returns the raw upstream URI. Validation (SSRF guard), session minting,
 and HLS proxying for playback are the host's job per the SDK contract.
 
+## Runtime prerequisite
+
+Playback resolution requires Playwright Chromium on the machine running MediaPager. Install it
+for the same operating-system account that runs the app. From a VidSrc checkout, build the
+plugin and run its generated Playwright installer:
+
+```sh
+dotnet build
+pwsh bin/Debug/net10.0/playwright.ps1 install chromium
+```
+
+On Linux, install the browser's system dependencies as well. If Chromium cannot start, VidSrc
+reports an actionable plugin error instead of treating the failure as a missing stream.
+
 Its Download action delegates to the community `IDownloadProviderPlugin` contract. That
 download provider is a separate plugin and must be loaded first; VidSrc does not contain or
 own download-transfer code.
