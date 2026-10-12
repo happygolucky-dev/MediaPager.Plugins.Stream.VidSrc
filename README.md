@@ -10,30 +10,28 @@ Resolves a MediaPager `ResolveAsync` request (IMDb or TMDB id, TV season/episode
 into the provider's HLS master playlist URL, by driving the embed page headlessly:
 
 1. Queries the provider data API (`status_code` must be `200`).
-2. Opens the embed in Playwright Chromium, blocks tracker/anti-automation scripts,
-   fakes `navigator.webdriver`, and clicks the player's big-play button until the
-   `/master.m3u8` request is captured.
+2. Requests the host's versioned browser-automation capability to open the embed, block
+   tracker/anti-automation URLs, hide `navigator.webdriver`, and click the player's
+   big-play button until the `/master.m3u8` request is captured. The plugin receives only
+   the matching URL, never a Playwright object or browser process handle.
 
 The plugin only ever returns the raw upstream URI. Validation (SSRF guard), session minting,
 and HLS proxying for playback are the host's job per the SDK contract.
 
 ## Runtime prerequisite
 
-Playback resolution requires Playwright Chromium on the machine running MediaPager. Install it
-for the same operating-system account that runs the app. From a VidSrc checkout, build the
-plugin and run its generated Playwright installer:
+When VidSrc is enabled, the host provisions the Chromium revision matched to its pinned
+Playwright package into `Tools:Directory/playwright/<version>` (Docker: `/tools`; desktop:
+the user's `.MediaPager/tools` cache). Tool files remain under the app-managed cache and
+are not installed into the host's system directories.
 
-```sh
-dotnet build
-pwsh bin/Debug/net10.0/playwright.ps1 install chromium
-```
+Linux installations still need the native Chromium shared libraries used by Playwright.
+The Docker image includes these; desktop Linux packages must provide the corresponding
+system dependencies. If the browser cannot start, the host reports an actionable error.
 
-On Linux, install the browser's system dependencies as well. If Chromium cannot start, VidSrc
-reports an actionable plugin error instead of treating the failure as a missing stream.
-
-Its Download action delegates to the community `IDownloadProviderPlugin` contract. That
-download provider is a separate plugin and must be loaded first; VidSrc does not contain or
-own download-transfer code.
+The generic Download action is supplied by the separate community Downloads plugin; VidSrc
+only provides stream resolution. Its manifest installs the Downloads plugin and the community
+download-interface package as dependencies, but VidSrc does not implement transfer code.
 
 ## Settings
 

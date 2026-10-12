@@ -1,197 +1,63 @@
-using System.Net.Http;
 using System.Text.Json;
 using System.Text.RegularExpressions;
-using Microsoft.Playwright;
 using MediaPager.App.PluginContracts;
 
 namespace MediaPager.Plugins.Stream.VidSrc;
 
-/// <summary>
-/// Owns the shared headless browser and one resolve operation at a time (an embed page can
-/// only produce one link at once). Faithful port of the resolve flow that used to live in the
-/// app host. Returns null when the provider has no stream, and reports local setup failures
-/// as structured plugin errors.
-/// </summary>
-internal sealed class PlaywrightResolver : IAsyncDisposable
+/// <summary>Builds VidSrc-specific requests and delegates all HTTP/browser work to the
+/// host-owned broker. The plugin never loads Playwright or receives browser objects.</summary>
+internal sealed class PlaywrightResolver(IBrowserAutomationBroker browser)
 {
     private static readonly Regex ImdbId = new(@"^tt\d+$", RegexOptions.CultureInvariant);
     private static readonly Regex TmdbId = new(@"^\d+$", RegexOptions.CultureInvariant);
+    private static readonly string[] BlockedUrlSubstrings =
+    [
+        "disable-devtool", "/beacon.min.js", "histats", "dtscout", "sharethis", "tynt",
+        "eyeota", "lijit", "onaudience", "crwdcntrl", "adsrvr", "rlcdn", "tapad",
+        "33across", "agkn", "ml314", "mrktmtrcs",
+    ];
 
-    private readonly SemaphoreSlim _gate = new(1, 1);
-    private IPlaywright? _playwright;
-    private IBrowser? _browser;
-
-    /// <summary>Resolve an id to an HLS master playlist URL, or null when unavailable.</summary>
-    public async Task<string?> ResolveAsync(string host, string userAgent, StreamResolveRequest request, CancellationToken cancellationToken)
+    public async Task<string?> ResolveAsync(
+        string host,
+        string userAgent,
+        StreamResolveRequest request,
+        CancellationToken cancellationToken)
     {
         var isImdb = ImdbId.IsMatch(request.ExternalId);
         var isTmdb = TmdbId.IsMatch(request.ExternalId);
-        if (!isImdb && !isTmdb)
-            return null;
+        if (!isImdb && !isTmdb) return null;
 
         var isTv = request.Kind == MediaKind.Tv;
-        if (isTv && (request.Season is null || request.Episode is null))
-            return null;
+        if (isTv && (request.Season is null || request.Episode is null)) return null;
 
         var apiParam = isImdb ? $"imdb={request.ExternalId}" : $"tmdb={request.ExternalId}";
+        var apiUri = isTv
+            ? new Uri($"https://data.{host}/api.php?type=tv&{apiParam}&season={request.Season}&episode={request.Episode}")
+            : new Uri($"https://data.{host}/api.php?type=movie&{apiParam}");
+
+        using (var apiJson = JsonDocument.Parse(await browser.GetPublicTextAsync(apiUri, cancellationToken)))
+        {
+            if (!apiJson.RootElement.TryGetProperty("status_code", out var statusElement))
+                return null;
+            var statusCode = statusElement.ValueKind == JsonValueKind.Number
+                ? statusElement.GetInt32()
+                : int.TryParse(statusElement.GetString(), out var parsed) ? parsed : 0;
+            if (statusCode != 200) return null;
+        }
+
         var embedPath = (isTv, isImdb) switch
         {
             (true, _) => $"embed/tv/{request.ExternalId}/{request.Season}/{request.Episode}",
             (false, true) => $"embed/{request.ExternalId}",
             _ => $"embed/movie/{request.ExternalId}",
         };
-
-        // Bound the gate wait so a previously stuck lookup can't wedge every later request.
-        using var gateTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(45));
-        using var gateLinked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, gateTimeout.Token);
-        try
-        {
-            await _gate.WaitAsync(gateLinked.Token);
-        }
-        catch (OperationCanceledException)
-        {
-            return null;
-        }
-
-        IPage? page = null;
-        try
-        {
-            // Step 1: ask the provider API whether a video exists for this id.
-            using (var client = new HttpClient())
-            {
-                var apiUrl = isTv
-                    ? $"https://data.{host}/api.php?type=tv&{apiParam}&season={request.Season}&episode={request.Episode}"
-                    : $"https://data.{host}/api.php?type=movie&{apiParam}";
-                var apiJson = await client.GetStringAsync(apiUrl, cancellationToken);
-                var statusElement = JsonDocument.Parse(apiJson).RootElement.GetProperty("status_code");
-                var statusCode = statusElement.ValueKind == JsonValueKind.Number
-                    ? statusElement.GetInt32()
-                    : int.Parse(statusElement.GetString()!);
-                if (statusCode != 200)
-                    return null;
-            }
-
-            // Step 2: load the embed page and capture the HLS master playlist request.
-            IBrowser browser;
-            try
-            {
-                browser = await GetBrowserAsync();
-            }
-            catch (OperationCanceledException)
-            {
-                throw;
-            }
-            catch (Exception exception)
-            {
-                throw new PluginOperationException(new PluginError(
-                    "vidsrc.chromium.unavailable",
-                    "VidSrc could not start Playwright Chromium. The browser may be missing or its operating-system dependencies may not be installed.",
-                    "Install Playwright Chromium for the same account that runs MediaPager. From a VidSrc checkout, run dotnet build, then run the generated bin/Debug/net10.0/playwright.ps1 install chromium script on Windows or the platform's generated Playwright install script on Linux/macOS. Install Linux browser dependencies too, then retry."), exception);
-            }
-
-            var context = await browser.NewContextAsync(new() { UserAgent = userAgent });
-            page = await context.NewPageAsync();
-
-            // Block the anti-automation script that wipes the page, plus tracker junk.
-            await page.RouteAsync("**/*", async route =>
-            {
-                if (IsTrackerOrAutomationBlocker(route.Request.Url))
-                    await route.AbortAsync();
-                else
-                    await route.ContinueAsync();
-            });
-
-            await page.AddInitScriptAsync("Object.defineProperty(navigator, 'webdriver', { get: () => undefined });");
-
-            var linkFound = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
-            page.Request += (_, req) =>
-            {
-                if (req.Url.Contains("/master.m3u8", StringComparison.OrdinalIgnoreCase))
-                    linkFound.TrySetResult(req.Url);
-            };
-
-            await page.GotoAsync($"https://{host}/{embedPath}");
-
-            // Keep nudging the player (#bigPlay) in every frame until the stream request shows
-            // up — the player iframe loads after the main page.
-            using var clickLoop = new PeriodicTimer(TimeSpan.FromSeconds(1));
-            _ = Task.Run(async () =>
-            {
-                while (!linkFound.Task.IsCompleted && await clickLoop.WaitForNextTickAsync())
-                {
-                    foreach (var frame in page.Frames)
-                    {
-                        try
-                        {
-                            await frame.EvaluateAsync(
-                                "document.querySelector('#bigPlay') && document.querySelector('#bigPlay').click()");
-                        }
-                        catch
-                        {
-                            // cross-origin frame
-                        }
-                    }
-                }
-            });
-
-            var done = await Task.WhenAny(linkFound.Task, Task.Delay(TimeSpan.FromSeconds(30)));
-            return done == linkFound.Task ? linkFound.Task.Result : null;
-        }
-        catch (PluginOperationException)
-        {
-            throw;
-        }
-        catch (Exception exception)
-        {
-            Console.Error.WriteLine($"[{nameof(PlaywrightResolver)}] resolve failed: {exception.Message}");
-            return null;
-        }
-        finally
-        {
-            if (page is not null)
-                await page.Context.CloseAsync();
-            _gate.Release();
-        }
-    }
-
-    private static bool IsTrackerOrAutomationBlocker(string url) =>
-        new[]
-        {
-            "disable-devtool", "/beacon.min.js", "histats", "dtscout", "sharethis", "tynt",
-            "eyeota", "lijit", "onaudience", "crwdcntrl", "adsrvr", "rlcdn", "tapad",
-            "33across", "agkn", "ml314", "mrktmtrcs",
-        }.Any(token => url.Contains(token, StringComparison.OrdinalIgnoreCase));
-
-    private async Task<IBrowser> GetBrowserAsync()
-    {
-        if (_browser is { IsConnected: true })
-            return _browser;
-
-        _playwright?.Dispose();
-        var playwright = await Playwright.CreateAsync();
-        _playwright = playwright;
-        try
-        {
-            _browser = await playwright.Chromium.LaunchAsync(new()
-            {
-                Headless = true,
-                Args = ["--disable-blink-features=AutomationControlled"],
-            });
-            return _browser;
-        }
-        catch
-        {
-            playwright.Dispose();
-            _playwright = null;
-            throw;
-        }
-    }
-
-    public async ValueTask DisposeAsync()
-    {
-        if (_browser is not null)
-            await _browser.CloseAsync();
-        _playwright?.Dispose();
-        _gate.Dispose();
+        var embedUri = new Uri($"https://{host}/{embedPath}");
+        return await browser.NavigateAndWaitForRequestAsync(new BrowserAutomationRequest(
+            embedUri,
+            userAgent,
+            BlockedUrlSubstrings,
+            RequestUrlContains: "/master.m3u8",
+            ClickSelector: "#bigPlay",
+            TimeoutSeconds: 30), cancellationToken);
     }
 }
