@@ -1,6 +1,5 @@
 using MediaPager.App.PluginContracts;
 using MediaPager.Plugins.Stream.VidSrc;
-using MediaPager.Plugins.Interface.Download;
 
 namespace MediaPager.Plugins.Stream.VidSrc;
 
@@ -11,9 +10,8 @@ namespace MediaPager.Plugins.Stream.VidSrc;
 /// </summary>
 public sealed class VidsrcProviderPlugin(
     IPluginSettingsStore settingsStore,
-    IPluginHost pluginHost,
-    IPluginActivity activity) :
-    IMediaPagerPlugin, IPluginSettingsSchema, IStreamProviderPlugin, IPluginActions
+    IBrowserAutomationBroker browserAutomation) :
+    IPluginSettingsSchema, IStreamProviderPlugin, IPluginActions
 {
     public const string PluginKey = "vidsrc";
     public const string HostSetting = "host";
@@ -39,7 +37,7 @@ public sealed class VidsrcProviderPlugin(
         new PluginSettingDefinition(UserAgentSetting, "Browser user agent", PluginSettingType.String, Default: DefaultUserAgent),
     ];
 
-    private readonly PlaywrightResolver _resolver = new();
+    private readonly PlaywrightResolver _resolver = new(browserAutomation);
 
     public IReadOnlyList<SourceDescriptor> Sources { get; } =
     [
@@ -51,10 +49,6 @@ public sealed class VidsrcProviderPlugin(
 
     public IReadOnlyList<PluginActionDescriptor> Actions { get; } =
     [
-        new("download", "Download with Vidsrc", "download", PluginActionSurface.PosterCard,
-            PluginActionPosition.TopRight, 110, [MediaKind.Movie, MediaKind.Tv], Scope: PluginActionScope.StreamItem),
-        new("download", "Download with Vidsrc", "download", PluginActionSurface.DetailScreen,
-            PluginActionPosition.TopRight, 110, [MediaKind.Movie, MediaKind.Tv], Scope: PluginActionScope.StreamItem),
         new("edit-metadata", "Edit metadata", "edit", PluginActionSurface.PosterCard,
             PluginActionPosition.TopRight, 110, [MediaKind.Movie, MediaKind.Tv],
             Click: PluginActionClick.HostAction, Scope: PluginActionScope.LibraryItem,
@@ -65,48 +59,11 @@ public sealed class VidsrcProviderPlugin(
             HostActionId: PluginHostActionIds.EditCatalogItem),
     ];
 
-    public async Task<IReadOnlyList<PluginActionDescriptor>> GetActionsAsync(CancellationToken cancellationToken)
-    {
-        var downloads = pluginHost.GetPlugin<IDownloadProviderPlugin>();
-        var availableActions = Actions.Where(action =>
-            !string.Equals(action.ActionId, "download", StringComparison.OrdinalIgnoreCase)).ToList();
+    public Task<IReadOnlyList<PluginActionDescriptor>> GetActionsAsync(CancellationToken cancellationToken) =>
+        Task.FromResult(Actions);
 
-        foreach (var action in Actions.Where(action =>
-                     string.Equals(action.ActionId, "download", StringComparison.OrdinalIgnoreCase)))
-        {
-            foreach (var kind in new[] { MediaKind.Movie, MediaKind.Tv })
-            {
-                var enabled = downloads is not null && await downloads.IsAvailableAsync(kind, cancellationToken);
-                availableActions.Add(action with
-                {
-                    Kinds = [kind],
-                    Enabled = enabled,
-                    AvailabilityMessage = enabled ? null : "Choose a destination catalog in Downloads settings before downloading.",
-                    AvailabilityPluginId = enabled ? null : "mediapager.actions.downloads",
-                });
-            }
-        }
-
-        return availableActions;
-    }
-
-    public async Task InvokeActionAsync(PluginActionContext context, CancellationToken cancellationToken)
-    {
-        if (!string.Equals(context.ActionId, "download", StringComparison.OrdinalIgnoreCase))
-            return;
-        var downloads = pluginHost.GetPlugin<IDownloadProviderPlugin>();
-        if (downloads is null)
-        {
-            activity.Notify("Downloads plugin unavailable", "Install the community download provider to use this action.", PluginNotificationLevel.Warning);
-            return;
-        }
-
-        await downloads.QueueDownloadAsync(context with
-        {
-            SourceKey = context.Kind == MediaKind.Tv ? TvSourceKeyValue : SourceKeyValue,
-            Kind = context.Kind is MediaKind.Movie or MediaKind.Tv ? context.Kind : MediaKind.Movie,
-        }, cancellationToken);
-    }
+    public Task InvokeActionAsync(PluginActionContext context, CancellationToken cancellationToken) =>
+        Task.CompletedTask;
 
     public Task<Paged<BrowseItem>> BrowseAsync(string sourceKey, string? query, int page, CancellationToken cancellationToken) =>
         Task.FromResult<Paged<BrowseItem>>(new([]));
