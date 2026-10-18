@@ -52,12 +52,27 @@ internal sealed class PlaywrightResolver(IBrowserAutomationBroker browser)
             _ => $"embed/movie/{request.ExternalId}",
         };
         var embedUri = new Uri($"https://{host}/{embedPath}");
-        return await browser.NavigateAndWaitForRequestAsync(new BrowserAutomationRequest(
+        var masterPlaylistUrl = await browser.NavigateAndWaitForRequestAsync(new BrowserAutomationRequest(
             embedUri,
             userAgent,
             BlockedUrlSubstrings,
             RequestUrlContains: "/master.m3u8",
             ClickSelector: "#bigPlay",
             TimeoutSeconds: 30), cancellationToken);
+        if (masterPlaylistUrl is null ||
+            !Uri.TryCreate(masterPlaylistUrl, UriKind.Absolute, out var masterPlaylistUri))
+            return masterPlaylistUrl;
+
+        try
+        {
+            var playlist = await browser.GetPublicTextAsync(masterPlaylistUri, cancellationToken);
+            return HlsMasterPlaylist.Find1080Variant(masterPlaylistUri, playlist)?.AbsoluteUri
+                ?? masterPlaylistUrl;
+        }
+        catch (Exception) when (!cancellationToken.IsCancellationRequested)
+        {
+            // Preserve the existing adaptive path if the optional quality probe fails.
+            return masterPlaylistUrl;
+        }
     }
 }

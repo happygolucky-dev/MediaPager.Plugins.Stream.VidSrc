@@ -10,6 +10,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Remove="tests/**/*.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="../../Official/MediaPager.App.PluginContracts/MediaPager.App.PluginContracts.csproj"
                       Condition="Exists('../../Official/MediaPager.App.PluginContracts/MediaPager.App.PluginContracts.csproj')" />
     <ProjectReference Include="../MediaPager.Plugins.Interface.Download/MediaPager.Plugins.Interface.Download.csproj"

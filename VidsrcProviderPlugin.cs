@@ -4,7 +4,7 @@ using MediaPager.Plugins.Stream.VidSrc;
 namespace MediaPager.Plugins.Stream.VidSrc;
 
 /// <summary>
-/// Community stream provider that resolves Vidsrc embeds to their HLS master playlists.
+/// Community stream provider that prefers a listed 1080p HLS variant when resolving Vidsrc embeds.
 /// Implements the MediaPager plugin SDK (IStreamProviderPlugin). This is not an official
 /// Nobugsgiven plugin; it is authored and maintained by the community under its own account.
 /// </summary>
@@ -29,7 +29,7 @@ public sealed class VidsrcProviderPlugin(
         Name: "Vidsrc",
         Version: "0.1.0",
         Author: "Community",
-        Description: "Resolves Vidsrc embeds to their HLS master playlists for streaming.");
+        Description: "Prefers a 1080p HLS variant when available; otherwise uses the master playlist.");
 
     public IReadOnlyList<PluginSettingDefinition> Settings { get; } =
     [
